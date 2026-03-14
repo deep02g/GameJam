@@ -1,0 +1,18 @@
+fileFormatVersion: 2
+guid: 95ecdda61c7d75947b0f17ab60996d50
+ScriptedImporter:
+  internalIDToNameTable: []
+  externalObjects: {}
+  serializedVersion: 2
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+  script: {fileID: 11500000, guid: dda12f74ff9116a42b23482252b2c482, type: 3}
+  _fileAsset: {instanceID: 0}
+AssetOrigin:
+  serializedVersion: 1
+  productId: 59857
+  packageName: Variable Weathered Cobblestone Substance
+  packageVersion: 1.1
+  assetPath: Assets/Tim's Substances/Cobblestone/Cobblestone.sbsar
+  uploadId: 731111
