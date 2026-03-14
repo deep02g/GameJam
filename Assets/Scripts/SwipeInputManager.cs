@@ -61,6 +61,9 @@ public class SwipeInputManager : MonoBehaviour
     [SerializeField] private float maxSwipeDuration = 0.75f;
     [SerializeField] private float maxGapBetweenSwipes = 0.8f;
     [SerializeField, Range(0.2f, 0.8f)] private float leftSectionWidthPercent = 0.5f;
+    [SerializeField] private bool enableTurnHoldDetection = true;
+    [SerializeField] private float holdActivationDistance = 60f;
+    [SerializeField, Range(0.8f, 3f)] private float holdVerticalBias = 1.2f;
     [SerializeField] private bool useUnscaledTime = true;
     [SerializeField] private bool enableMouseSimulation = true;
     [SerializeField] private bool debugLogs = true;
@@ -73,8 +76,15 @@ public class SwipeInputManager : MonoBehaviour
     [Header("Gesture List")]
     [SerializeField] private List<SwipeGesture> gestures = new List<SwipeGesture>();
 
+    [Header("Turn Hold Events")]
+    [SerializeField] private UnityEvent onTurnLeftHoldStarted;
+    [SerializeField] private UnityEvent onTurnLeftHoldEnded;
+    [SerializeField] private UnityEvent onTurnRightHoldStarted;
+    [SerializeField] private UnityEvent onTurnRightHoldEnded;
+
     private readonly Dictionary<int, SwipeStart> activeTouchStarts = new Dictionary<int, SwipeStart>();
     private readonly List<SwipeSample> swipeBuffer = new List<SwipeSample>();
+    private readonly Dictionary<int, HoldPointer> activeHoldPointers = new Dictionary<int, HoldPointer>();
 
     private SwipeStart mouseSwipeStart;
     private bool isMouseTracking;
@@ -94,6 +104,16 @@ public class SwipeInputManager : MonoBehaviour
         public SwipeDirection Direction;
     }
 
+    private struct HoldPointer
+    {
+        public Vector2 StartPosition;
+        public Vector2 CurrentPosition;
+        public SwipeScreenSection Section;
+    }
+
+    public bool IsTurnLeftHeld { get; private set; }
+    public bool IsTurnRightHeld { get; private set; }
+
     private void Awake()
     {
         RecalculateMaxGestureLength();
@@ -111,6 +131,10 @@ public class SwipeInputManager : MonoBehaviour
 #if ENABLE_INPUT_SYSTEM
         EnhancedTouchSupport.Disable();
 #endif
+        activeTouchStarts.Clear();
+        activeHoldPointers.Clear();
+        isMouseTracking = false;
+        SetTurnHoldState(false, false);
     }
 
     private void Reset()
@@ -127,6 +151,8 @@ public class SwipeInputManager : MonoBehaviour
         maxSwipeDuration = Mathf.Max(0.01f, maxSwipeDuration);
         maxGapBetweenSwipes = Mathf.Max(0.01f, maxGapBetweenSwipes);
         leftSectionWidthPercent = Mathf.Clamp(leftSectionWidthPercent, 0.2f, 0.8f);
+        holdActivationDistance = Mathf.Max(1f, holdActivationDistance);
+        holdVerticalBias = Mathf.Clamp(holdVerticalBias, 0.8f, 3f);
         minimumGestureLength = Mathf.Max(1, minimumGestureLength);
 
         if (presetToApply != GesturePreset.None)
@@ -147,6 +173,8 @@ public class SwipeInputManager : MonoBehaviour
         HandleTouchInputLegacy();
         HandleMouseInputLegacy();
 #endif
+
+        EvaluateTurnHoldState();
     }
 
     private void HandleTouchInputLegacy()
@@ -158,21 +186,30 @@ public class SwipeInputManager : MonoBehaviour
             switch (touch.phase)
             {
                 case UnityEngine.TouchPhase.Began:
-                    activeTouchStarts[touch.fingerId] = new SwipeStart
+                    var beginSwipe = new SwipeStart
                     {
                         Position = touch.position,
                         Time = Now(),
                         Consumed = false
                     };
+                    activeTouchStarts[touch.fingerId] = beginSwipe;
+                    activeHoldPointers[touch.fingerId] = new HoldPointer
+                    {
+                        StartPosition = beginSwipe.Position,
+                        CurrentPosition = beginSwipe.Position,
+                        Section = GetScreenSection(beginSwipe.Position)
+                    };
                     break;
 
                 case UnityEngine.TouchPhase.Moved:
                 case UnityEngine.TouchPhase.Stationary:
+                    UpdateHoldPointer(touch.fingerId, touch.position);
                     TryConsumeLiveSwipe(touch.fingerId, touch.position, Now());
                     break;
 
                 case UnityEngine.TouchPhase.Ended:
                 case UnityEngine.TouchPhase.Canceled:
+                    activeHoldPointers.Remove(touch.fingerId);
                     if (activeTouchStarts.TryGetValue(touch.fingerId, out SwipeStart start))
                     {
                         if (!start.Consumed)
@@ -200,16 +237,24 @@ public class SwipeInputManager : MonoBehaviour
                 Time = Now(),
                 Consumed = false
             };
+            activeHoldPointers[-1] = new HoldPointer
+            {
+                StartPosition = mouseSwipeStart.Position,
+                CurrentPosition = mouseSwipeStart.Position,
+                Section = GetScreenSection(mouseSwipeStart.Position)
+            };
         }
 
         if (isMouseTracking && Input.GetMouseButton(0))
         {
+            UpdateHoldPointer(-1, Input.mousePosition);
             TryConsumeLiveMouseSwipe(Input.mousePosition, Now());
         }
 
         if (isMouseTracking && Input.GetMouseButtonUp(0))
         {
             isMouseTracking = false;
+            activeHoldPointers.Remove(-1);
 
             if (!mouseSwipeStart.Consumed)
             {
@@ -229,21 +274,30 @@ public class SwipeInputManager : MonoBehaviour
             switch (touch.phase)
             {
                 case UnityEngine.InputSystem.TouchPhase.Began:
-                    activeTouchStarts[touch.touchId] = new SwipeStart
+                    var beginSwipe = new SwipeStart
                     {
                         Position = touch.screenPosition,
                         Time = Now(),
                         Consumed = false
                     };
+                    activeTouchStarts[touch.touchId] = beginSwipe;
+                    activeHoldPointers[touch.touchId] = new HoldPointer
+                    {
+                        StartPosition = beginSwipe.Position,
+                        CurrentPosition = beginSwipe.Position,
+                        Section = GetScreenSection(beginSwipe.Position)
+                    };
                     break;
 
                 case UnityEngine.InputSystem.TouchPhase.Moved:
                 case UnityEngine.InputSystem.TouchPhase.Stationary:
+                    UpdateHoldPointer(touch.touchId, touch.screenPosition);
                     TryConsumeLiveSwipe(touch.touchId, touch.screenPosition, Now());
                     break;
 
                 case UnityEngine.InputSystem.TouchPhase.Ended:
                 case UnityEngine.InputSystem.TouchPhase.Canceled:
+                    activeHoldPointers.Remove(touch.touchId);
                     if (activeTouchStarts.TryGetValue(touch.touchId, out SwipeStart start))
                     {
                         if (!start.Consumed)
@@ -274,16 +328,25 @@ public class SwipeInputManager : MonoBehaviour
                 Time = Now(),
                 Consumed = false
             };
+            activeHoldPointers[-1] = new HoldPointer
+            {
+                StartPosition = mouseSwipeStart.Position,
+                CurrentPosition = mouseSwipeStart.Position,
+                Section = GetScreenSection(mouseSwipeStart.Position)
+            };
         }
 
         if (isMouseTracking && mouse.leftButton.isPressed)
         {
-            TryConsumeLiveMouseSwipe(mouse.position.ReadValue(), Now());
+            Vector2 mousePos = mouse.position.ReadValue();
+            UpdateHoldPointer(-1, mousePos);
+            TryConsumeLiveMouseSwipe(mousePos, Now());
         }
 
         if (isMouseTracking && mouse.leftButton.wasReleasedThisFrame)
         {
             isMouseTracking = false;
+            activeHoldPointers.Remove(-1);
 
             if (!mouseSwipeStart.Consumed)
             {
@@ -403,6 +466,113 @@ public class SwipeInputManager : MonoBehaviour
         RegisterSwipe(section, direction, currentTime);
     }
 
+    private void EvaluateTurnHoldState()
+    {
+        if (!enableTurnHoldDetection)
+        {
+            SetTurnHoldState(false, false);
+            return;
+        }
+
+        bool hasLeftUp = false;
+        bool hasLeftDown = false;
+        bool hasRightUp = false;
+        bool hasRightDown = false;
+
+        foreach (HoldPointer pointer in activeHoldPointers.Values)
+        {
+            if (!TryGetHoldVerticalDirection(pointer, out SwipeDirection direction)) continue;
+
+            if (pointer.Section == SwipeScreenSection.Left)
+            {
+                if (direction == SwipeDirection.Up) hasLeftUp = true;
+                if (direction == SwipeDirection.Down) hasLeftDown = true;
+                continue;
+            }
+
+            if (pointer.Section == SwipeScreenSection.Right)
+            {
+                if (direction == SwipeDirection.Up) hasRightUp = true;
+                if (direction == SwipeDirection.Down) hasRightDown = true;
+            }
+        }
+
+        bool nextTurnRight = hasRightUp && hasLeftDown;
+        bool nextTurnLeft = hasLeftUp && hasRightDown;
+
+        if (nextTurnLeft && nextTurnRight)
+        {
+            if (IsTurnLeftHeld && !IsTurnRightHeld)
+            {
+                nextTurnRight = false;
+            }
+            else if (IsTurnRightHeld && !IsTurnLeftHeld)
+            {
+                nextTurnLeft = false;
+            }
+            else
+            {
+                nextTurnLeft = false;
+                nextTurnRight = false;
+            }
+        }
+
+        SetTurnHoldState(nextTurnLeft, nextTurnRight);
+    }
+
+    private bool TryGetHoldVerticalDirection(HoldPointer pointer, out SwipeDirection direction)
+    {
+        direction = SwipeDirection.Up;
+
+        Vector2 delta = pointer.CurrentPosition - pointer.StartPosition;
+        if (delta.magnitude < holdActivationDistance) return false;
+        if (Mathf.Abs(delta.y) < Mathf.Abs(delta.x) * holdVerticalBias) return false;
+
+        direction = delta.y >= 0f ? SwipeDirection.Up : SwipeDirection.Down;
+        return true;
+    }
+
+    private void SetTurnHoldState(bool leftHeld, bool rightHeld)
+    {
+        if (IsTurnLeftHeld != leftHeld)
+        {
+            if (leftHeld)
+            {
+                if (debugLogs) Debug.Log("[SwipeInputManager] Hold started: Turn Left");
+                onTurnLeftHoldStarted?.Invoke();
+            }
+            else
+            {
+                if (debugLogs) Debug.Log("[SwipeInputManager] Hold ended: Turn Left");
+                onTurnLeftHoldEnded?.Invoke();
+            }
+        }
+
+        if (IsTurnRightHeld != rightHeld)
+        {
+            if (rightHeld)
+            {
+                if (debugLogs) Debug.Log("[SwipeInputManager] Hold started: Turn Right");
+                onTurnRightHoldStarted?.Invoke();
+            }
+            else
+            {
+                if (debugLogs) Debug.Log("[SwipeInputManager] Hold ended: Turn Right");
+                onTurnRightHoldEnded?.Invoke();
+            }
+        }
+
+        IsTurnLeftHeld = leftHeld;
+        IsTurnRightHeld = rightHeld;
+    }
+
+    private void UpdateHoldPointer(int pointerId, Vector2 position)
+    {
+        if (!activeHoldPointers.TryGetValue(pointerId, out HoldPointer pointer)) return;
+        pointer.CurrentPosition = position;
+        activeHoldPointers[pointerId] = pointer;
+    }
+
     private static SwipeDirection GetDirection(Vector2 delta)
     {
         if (Mathf.Abs(delta.x) > Mathf.Abs(delta.y))
@@ -472,17 +642,9 @@ public class SwipeInputManager : MonoBehaviour
                     new SwipeStep { section = SwipeScreenSection.Right, direction = SwipeDirection.Up },
                     new SwipeStep { section = SwipeScreenSection.Left, direction = SwipeDirection.Down }),
                 CreateGesture(
-                    "Right Up + Right Up",
-                    new SwipeStep { section = SwipeScreenSection.Right, direction = SwipeDirection.Up },
-                    new SwipeStep { section = SwipeScreenSection.Right, direction = SwipeDirection.Up }),
-                CreateGesture(
-                    "Left Up + Left Down",
+                    "Left Up + Right Down",
                     new SwipeStep { section = SwipeScreenSection.Left, direction = SwipeDirection.Up },
-                    new SwipeStep { section = SwipeScreenSection.Left, direction = SwipeDirection.Down }),
-                CreateGesture(
-                    "Right Down + Left Up",
-                    new SwipeStep { section = SwipeScreenSection.Right, direction = SwipeDirection.Down },
-                    new SwipeStep { section = SwipeScreenSection.Left, direction = SwipeDirection.Up })
+                    new SwipeStep { section = SwipeScreenSection.Right, direction = SwipeDirection.Down })
             };
         }
 
