@@ -68,6 +68,7 @@ public class SwipeInputManager : MonoBehaviour
     [SerializeField] private bool enableMouseSimulation = true;
     [SerializeField] private bool debugLogs = true;
     [SerializeField, Min(1)] private int minimumGestureLength = 2;
+    [SerializeField] private bool emitSingleSwipeEvents = true;
 
     [Header("Preset")]
     [Tooltip("Set this to a preset to auto-fill gesture list. It resets back to None after applying.")]
@@ -75,12 +76,6 @@ public class SwipeInputManager : MonoBehaviour
 
     [Header("Gesture List")]
     [SerializeField] private List<SwipeGesture> gestures = new List<SwipeGesture>();
-
-    [Header("Turn Hold Events")]
-    [SerializeField] private UnityEvent onTurnLeftHoldStarted;
-    [SerializeField] private UnityEvent onTurnLeftHoldEnded;
-    [SerializeField] private UnityEvent onTurnRightHoldStarted;
-    [SerializeField] private UnityEvent onTurnRightHoldEnded;
 
     private readonly Dictionary<int, SwipeStart> activeTouchStarts = new Dictionary<int, SwipeStart>();
     private readonly List<SwipeSample> swipeBuffer = new List<SwipeSample>();
@@ -113,6 +108,9 @@ public class SwipeInputManager : MonoBehaviour
 
     public bool IsTurnLeftHeld { get; private set; }
     public bool IsTurnRightHeld { get; private set; }
+    public bool IsPitchUpHeld { get; private set; }
+    public bool IsPitchDownHeld { get; private set; }
+    public event Action<SwipeDirection, SwipeScreenSection> SingleSwipeDetected;
 
     private void Awake()
     {
@@ -134,7 +132,7 @@ public class SwipeInputManager : MonoBehaviour
         activeTouchStarts.Clear();
         activeHoldPointers.Clear();
         isMouseTracking = false;
-        SetTurnHoldState(false, false);
+        SetHoldState(false, false, false, false);
     }
 
     private void Reset()
@@ -384,6 +382,11 @@ public class SwipeInputManager : MonoBehaviour
 
         lastSwipeTime = timestamp;
 
+        if (emitSingleSwipeEvents && activeHoldPointers.Count <= 1)
+        {
+            SingleSwipeDetected?.Invoke(direction, section);
+        }
+
         TrimBufferToMaxLength();
 
         TryRecognizeGesture();
@@ -470,7 +473,7 @@ public class SwipeInputManager : MonoBehaviour
     {
         if (!enableTurnHoldDetection)
         {
-            SetTurnHoldState(false, false);
+            SetHoldState(false, false, false, false);
             return;
         }
 
@@ -499,6 +502,8 @@ public class SwipeInputManager : MonoBehaviour
 
         bool nextTurnRight = hasRightUp && hasLeftDown;
         bool nextTurnLeft = hasLeftUp && hasRightDown;
+        bool nextPitchDown = hasLeftUp && hasRightUp;
+        bool nextPitchUp = hasLeftDown && hasRightDown;
 
         if (nextTurnLeft && nextTurnRight)
         {
@@ -517,7 +522,24 @@ public class SwipeInputManager : MonoBehaviour
             }
         }
 
-        SetTurnHoldState(nextTurnLeft, nextTurnRight);
+        if (nextPitchUp && nextPitchDown)
+        {
+            if (IsPitchUpHeld && !IsPitchDownHeld)
+            {
+                nextPitchDown = false;
+            }
+            else if (IsPitchDownHeld && !IsPitchUpHeld)
+            {
+                nextPitchUp = false;
+            }
+            else
+            {
+                nextPitchUp = false;
+                nextPitchDown = false;
+            }
+        }
+
+        SetHoldState(nextTurnLeft, nextTurnRight, nextPitchUp, nextPitchDown);
     }
 
     private bool TryGetHoldVerticalDirection(HoldPointer pointer, out SwipeDirection direction)
@@ -532,19 +554,17 @@ public class SwipeInputManager : MonoBehaviour
         return true;
     }
 
-    private void SetTurnHoldState(bool leftHeld, bool rightHeld)
+    private void SetHoldState(bool leftHeld, bool rightHeld, bool pitchUpHeld, bool pitchDownHeld)
     {
         if (IsTurnLeftHeld != leftHeld)
         {
             if (leftHeld)
             {
                 if (debugLogs) Debug.Log("[SwipeInputManager] Hold started: Turn Left");
-                onTurnLeftHoldStarted?.Invoke();
             }
             else
             {
                 if (debugLogs) Debug.Log("[SwipeInputManager] Hold ended: Turn Left");
-                onTurnLeftHoldEnded?.Invoke();
             }
         }
 
@@ -553,17 +573,41 @@ public class SwipeInputManager : MonoBehaviour
             if (rightHeld)
             {
                 if (debugLogs) Debug.Log("[SwipeInputManager] Hold started: Turn Right");
-                onTurnRightHoldStarted?.Invoke();
             }
             else
             {
                 if (debugLogs) Debug.Log("[SwipeInputManager] Hold ended: Turn Right");
-                onTurnRightHoldEnded?.Invoke();
+            }
+        }
+
+        if (IsPitchUpHeld != pitchUpHeld)
+        {
+            if (pitchUpHeld)
+            {
+                if (debugLogs) Debug.Log("[SwipeInputManager] Hold started: Pitch Up");
+            }
+            else
+            {
+                if (debugLogs) Debug.Log("[SwipeInputManager] Hold ended: Pitch Up");
+            }
+        }
+
+        if (IsPitchDownHeld != pitchDownHeld)
+        {
+            if (pitchDownHeld)
+            {
+                if (debugLogs) Debug.Log("[SwipeInputManager] Hold started: Pitch Down");
+            }
+            else
+            {
+                if (debugLogs) Debug.Log("[SwipeInputManager] Hold ended: Pitch Down");
             }
         }
 
         IsTurnLeftHeld = leftHeld;
         IsTurnRightHeld = rightHeld;
+        IsPitchUpHeld = pitchUpHeld;
+        IsPitchDownHeld = pitchDownHeld;
     }
 
     private void UpdateHoldPointer(int pointerId, Vector2 position)
